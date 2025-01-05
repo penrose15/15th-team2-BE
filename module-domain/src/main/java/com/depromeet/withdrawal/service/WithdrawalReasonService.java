@@ -20,6 +20,6 @@ public class WithdrawalReasonService implements CreateWithdrawalReasonUseCase {
     public void save(CreateWithdrawalReasonCommand withdrawalReasonCommand) {
         ReasonType reasonType = ReasonType.findByCode(withdrawalReasonCommand.reasonCode());
         String feedback = withdrawalReasonCommand.feedback();
-        withdrawalReasonPort.writeToSheet(reasonType, feedback);
+        withdrawalReasonPort.writeWithdrawalToSheet(reasonType, feedback);
     }
 }

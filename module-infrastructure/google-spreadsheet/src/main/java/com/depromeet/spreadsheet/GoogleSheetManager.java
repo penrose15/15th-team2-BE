@@ -1,12 +1,14 @@
 package com.depromeet.spreadsheet;
 
-import static com.depromeet.type.withdrawal.WithdrawalReasonErrorType.FAILED_TO_INSERT_DATA_TO_SPREADSHEET;
-
+import com.depromeet.config.ImageDomainProperties;
 import com.depromeet.config.SpreadSheetProperties;
+import com.depromeet.exception.GoogleSheetException;
 import com.depromeet.exception.InternalServerException;
 import com.depromeet.image.domain.Image;
 import com.depromeet.report.port.in.command.CreateReportCommand;
 import com.depromeet.report.port.out.persistence.ReportPersistencePort;
+import com.depromeet.type.report.ReportErrorType;
+import com.depromeet.type.withdrawal.WithdrawalReasonErrorType;
 import com.depromeet.withdrawal.domain.ReasonType;
 import com.depromeet.withdrawal.port.out.persistence.WithdrawalReasonPort;
 import com.google.api.client.googleapis.javanet.GoogleNetHttpTransport;
@@ -28,7 +30,9 @@ import java.util.Collections;
 import java.util.List;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
+import org.springframework.retry.annotation.Backoff;
+import org.springframework.retry.annotation.Recover;
+import org.springframework.retry.annotation.Retryable;
 import org.springframework.stereotype.Component;
 
 @Slf4j
@@ -39,12 +43,15 @@ public class GoogleSheetManager implements WithdrawalReasonPort, ReportPersisten
     private static final List<String> SCOPES = Collections.singletonList(SheetsScopes.SPREADSHEETS);
 
     private final SpreadSheetProperties spreadSheetProperties;
-
-    @Value("${cloud-front.domain}")
-    private String domain;
+    private final ImageDomainProperties imageDomainProperties;
 
     @Override
-    public void writeToSheet(ReasonType reasonType, String feedback) {
+    @Retryable(
+            retryFor = GoogleSheetException.class,
+            maxAttempts = 3,
+            backoff = @Backoff(delay = 1000),
+            recover = "recoverWriteWithdrawalReason")
+    public void writeWithdrawalToSheet(ReasonType reasonType, String feedback) {
         try {
             Sheets sheet = getSheetService(spreadSheetProperties.applicationName());
             List<List<Object>> data = getData(reasonType, feedback);
@@ -61,9 +68,8 @@ public class GoogleSheetManager implements WithdrawalReasonPort, ReportPersisten
                             .setInsertDataOption("INSERT_ROWS")
                             .setIncludeValuesInResponse(true)
                             .execute();
-        } catch (Exception e) {
-            log.error("Error writing to sheet", e);
-            throw new InternalServerException(FAILED_TO_INSERT_DATA_TO_SPREADSHEET);
+        } catch (IOException | GeneralSecurityException e) {
+            throw new GoogleSheetException(e);
         }
     }
 
@@ -90,7 +96,20 @@ public class GoogleSheetManager implements WithdrawalReasonPort, ReportPersisten
         return data;
     }
 
+    @Recover
+    public void recoverWriteWithdrawalReason(
+            GoogleSheetException e, ReasonType reasonType, String feedback) {
+        log.error("Error writing withdrawal to sheet", e);
+        throw new InternalServerException(
+                WithdrawalReasonErrorType.FAILED_TO_INSERT_DATA_TO_SPREADSHEET);
+    }
+
     @Override
+    @Retryable(
+            retryFor = GoogleSheetException.class,
+            maxAttempts = 3,
+            backoff = @Backoff(delay = 1000),
+            recover = "recoverWriteReport")
     public void writeReportToSheet(CreateReportCommand command) {
         try {
             Sheets sheet = getSheetService(spreadSheetProperties.reportApplicationName());
@@ -108,9 +127,8 @@ public class GoogleSheetManager implements WithdrawalReasonPort, ReportPersisten
                             .setInsertDataOption("INSERT_ROWS")
                             .setIncludeValuesInResponse(true)
                             .execute();
-        } catch (Exception e) {
-            log.error("Error writing to sheet", e);
-            throw new InternalServerException(FAILED_TO_INSERT_DATA_TO_SPREADSHEET);
+        } catch (IOException | GeneralSecurityException e) {
+            throw new GoogleSheetException(e);
         }
     }
 
@@ -142,8 +160,14 @@ public class GoogleSheetManager implements WithdrawalReasonPort, ReportPersisten
         return images.isEmpty()
                 ? ""
                 : images.stream()
-                        .map(image -> domain + "/" + image.getImageName())
+                        .map(image -> imageDomainProperties.domain() + "/" + image.getImageName())
                         .toList()
                         .toString();
+    }
+
+    @Recover
+    public void recoverWriteReport(GoogleSheetException e, CreateReportCommand command) {
+        log.error("Error writing report to sheet", e);
+        throw new InternalServerException(ReportErrorType.FAILED_TO_INSERT_DATA_TO_SPREADSHEET);
     }
 }
